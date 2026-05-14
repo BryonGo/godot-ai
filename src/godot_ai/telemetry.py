@@ -45,6 +45,7 @@ from urllib.parse import urlparse
 import httpx
 
 from godot_ai import __version__ as _PACKAGE_VERSION
+from godot_ai.protocol.errors import ErrorCode
 
 logger = logging.getLogger("godot-ai-telemetry")
 
@@ -655,6 +656,23 @@ def _extract_session_id(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str | 
     return None
 
 
+def _safe_exception_category(exc: Exception) -> str:
+    """Return a telemetry-safe error category without exception details.
+
+    ``GodotCommandError.__str__`` includes plugin-provided ``error.data``;
+    other exception messages can include user input or project paths. The
+    decorator only needs a stable category for aggregate failure counts.
+    """
+    if exc.__class__.__name__ == "GodotCommandError":
+        code = getattr(exc, "code", None)
+        if code in {member.value for member in ErrorCode}:
+            return str(code)
+        if isinstance(code, ErrorCode):
+            return code.value
+        return "GodotCommandError"
+    return exc.__class__.__name__
+
+
 def _instrument(
     func: Callable[..., Any],
     *,
@@ -691,7 +709,7 @@ def _instrument(
                 _emit(start, True, sub, sid, None)
                 return result
             except Exception as exc:
-                err = str(exc)
+                err = _safe_exception_category(exc)
                 _emit(start, False, sub, sid, err)
                 raise
 
@@ -708,7 +726,7 @@ def _instrument(
             _emit(start, True, sub, sid, None)
             return result
         except Exception as exc:
-            err = str(exc)
+            err = _safe_exception_category(exc)
             _emit(start, False, sub, sid, err)
             raise
 
