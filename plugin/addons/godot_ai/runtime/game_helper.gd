@@ -36,6 +36,16 @@ var _logger_attached := false
 ## frames at FLUSH_BATCH_LIMIT per frame rather than blasting the whole
 ## queue in a single _process tick.
 var _pending_outbound: Array = []
+## #490: in-flight evals, keyed by request_id (multiple deferred game_evals
+## can run at once). Each entry: {node:Node, token:String, baseline:int}.
+## `token` names this eval's unique wrapper function so a runtime error is
+## attributed only to the eval that actually raised it — not an unrelated
+## background game error, and not a sibling overlapping eval. `baseline` is the
+## logger's script-error seq just before this eval ran. The editor's eval_check
+## probe (and #488's in-flight poll loop, when the game is focused) consult
+## these to report a runtime error that aborted execute() before the reply.
+var _inflight_evals: Dictionary = {}
+var _eval_token_counter: int = 0
 
 
 func _ready() -> void:
@@ -117,6 +127,9 @@ func _on_debug_message(message: String, data: Array) -> bool:
 			return true
 		"eval":
 			_handle_eval(data)
+			return true
+		"eval_check":
+			_handle_eval_check(data)
 			return true
 		"game_command":
 			_handle_game_command(data)
@@ -553,25 +566,53 @@ func _handle_eval(data: Array) -> void:
 		_reply_eval_error(request_id, "No code provided")
 		return
 
-	## Wrap user code so we can capture a return value.
-	## Uses await so user code can use `await` internally.
+	## Wrap user code in an execute() coroutine (so it can `await` internally)
+	## whose inner function is uniquely named per eval. A runtime error's
+	## backtrace then carries `_mcp_run_<token>`, letting us attribute it to
+	## THIS eval — not an unrelated background game error, and not a sibling
+	## overlapping eval. (#490)
+	_eval_token_counter += 1
+	var token := str(_eval_token_counter)
+	var run_fn := "_mcp_run_%s" % token
 	var script_source := (
 		"extends Node\n"
 		+ "func execute():\n"
-		+ "\tvar __result = null\n"
-		+ "\t__result = await _run()\n"
-		+ "\treturn __result\n\n"
-		+ "func _run():\n"
+		+ "\treturn await %s()\n\n" % run_fn
+		+ "func %s():\n" % run_fn
 		+ _indent_eval_code(code)
 	)
 
+	## Snapshot the logger's script-error seq BEFORE running so we only attribute
+	## errors raised by this eval. In a debug build a parse error aborts reload()
+	## and a runtime error aborts execute() — either way this function may never
+	## reach its reply: the editor infers a compile error from the missing
+	## mcp:eval_compiled beacon, and a runtime error is reported (via the
+	## eval_check probe / the in-flight poll loop) once a logged error past this
+	## baseline carries this eval's token.
+	var baseline: int = _logger.script_error_seq() if _logger != null else 0
+
 	var script: GDScript = GDScript.new()
 	script.source_code = script_source
+	## #490: ack BEFORE reload(). A parse error aborts this function at reload()
+	## without a return code in a debug build, so this is our only chance to tell
+	## the editor "received + about to compile." The editor uses that to tell a
+	## real parse error (acked, never compiled) apart from a message it simply
+	## hasn't serviced yet (never acked); see mcp_debugger_plugin._on_eval_grace.
+	EngineDebugger.send_message("mcp:eval_ack", [request_id])
+	## reload() ABORTS this function on a parse error in a debug build (it does
+	## not return a non-OK code there), so the lines below only run when the
+	## source compiled. Keep reload() INLINE — moving it behind a timer/await
+	## poisons subsequent evals (#490). The err branch still matters for the
+	## editor process (handler unit tests), where reload() does return.
 	var err: int = script.reload()
 	if err != OK:
 		_reply_eval_error(request_id,
 			"Failed to compile GDScript (error %d). Check syntax." % err)
 		return
+
+	## Compiled OK — tell the editor so its grace timer doesn't flag a compile
+	## error and so it begins probing for a runtime error.
+	EngineDebugger.send_message("mcp:eval_compiled", [request_id])
 
 	var temp_node := Node.new()
 	temp_node.set_script(script)
@@ -583,10 +624,15 @@ func _handle_eval(data: Array) -> void:
 		_reply_eval_error(request_id, "Internal error: eval wrapper is missing execute().")
 		return
 
-	## Drive execute() as a fire-and-forget coroutine that records its
-	## outcome into `holder`, then poll frames until it finishes or the
-	## deadline passes. A plain `await temp_node.execute()` has no escape
-	## hatch: if user code never returns, we never reach the reply/cleanup
+	## Register in-flight BEFORE running: a runtime error aborts execute() (and
+	## may unwind this function) before we could record it afterward, and the
+	## editor probe / poll loop need the entry to attribute and report the error.
+	_inflight_evals[request_id] = {"node": temp_node, "token": token, "baseline": baseline}
+
+	## Drive execute() as a fire-and-forget coroutine that records its outcome
+	## into `holder`, then poll frames until it finishes or the deadline passes
+	## (#488's hung-await guard). A plain `await temp_node.execute()` has no
+	## escape hatch: if user code never returns, we never reach the reply/cleanup
 	## below and the request hangs with the node leaked.
 	var holder := {"done": false, "value": null, "abandoned": false}
 	_drive_eval(temp_node, holder)
@@ -594,17 +640,23 @@ func _handle_eval(data: Array) -> void:
 	var tree := get_tree()
 	var deadline_ms := int(EVAL_TIMEOUT_SEC * 1000.0)
 	var start_ms := Time.get_ticks_msec()
-	## process_frame fires every idle frame regardless of tree pause, so this
-	## deadline still elapses while the game is paused.
 	while not holder["done"] and (Time.get_ticks_msec() - start_ms) < deadline_ms:
+		## #490 focused fast path: a runtime error aborts _drive_eval (holder
+		## never completes), so check each frame whether THIS eval's token now
+		## appears in a logged error and report it immediately. (Backgrounded,
+		## this loop is frozen and the editor probe does the same job.)
+		if _try_report_eval_runtime_error(request_id):
+			holder["abandoned"] = true
+			return
 		await tree.process_frame
 
 	if not holder["done"]:
-		## Still running past the deadline. Mark abandoned so a late
-		## completion in _drive_eval drops its result and frees the node,
-		## detach the node now so it stops touching the scene, and reply with
-		## a clear timeout instead of letting the request ride to INTERNAL_ERROR.
+		## Past the 8s deadline. Disambiguate a runtime error (its token is in a
+		## logged error) from a genuine hung await before the generic timeout.
 		holder["abandoned"] = true
+		if _try_report_eval_runtime_error(request_id):
+			return
+		_inflight_evals.erase(request_id)
 		if is_instance_valid(temp_node):
 			remove_child(temp_node)
 		_reply_eval_error(request_id,
@@ -614,6 +666,8 @@ func _handle_eval(data: Array) -> void:
 				% int(EVAL_TIMEOUT_SEC))
 		return
 
+	## Clean finish.
+	_inflight_evals.erase(request_id)
 	temp_node.queue_free()
 	_reply_eval_response(request_id, holder["value"])
 
@@ -648,6 +702,46 @@ func _reply_eval_error(request_id: String, message: String) -> void:
 func _reply_eval_response(request_id: String, value: Variant) -> void:
 	EngineDebugger.send_message("mcp:eval_response",
 		[request_id, JSON.stringify(_variant_to_json(value))])
+
+
+## #490: if a logged script error past THIS eval's baseline carries its unique
+## wrapper-function token, a runtime error aborted it before it could reply —
+## report it with the real text + line. Returns true if it reported. Called
+## from the editor's eval_check probe (the reliable path when a backgrounded
+## game's idle loop is frozen — the debugger capture callback still runs) and
+## from _handle_eval's poll loop (the focused fast path). Token + baseline
+## matching means an unrelated background error, or a sibling overlapping
+## eval's error, can never fail this request.
+func _try_report_eval_runtime_error(request_id: String) -> bool:
+	if _logger == null:
+		return false
+	var entry = _inflight_evals.get(request_id)
+	if entry == null:
+		return false
+	var text: String = _logger.find_script_error_since(
+		int(entry["baseline"]), "_mcp_run_%s" % str(entry["token"]))
+	if text.is_empty():
+		return false
+	_inflight_evals.erase(request_id)
+	var node: Node = entry["node"]
+	if node != null and is_instance_valid(node):
+		node.queue_free()
+	if EngineDebugger.is_active():
+		EngineDebugger.send_message("mcp:eval_runtime_error", [request_id, text])
+	return true
+
+
+## #490: answer an editor eval_check probe. The editor polls this once the
+## eval has compiled but not yet replied. This runs in the debugger capture
+## callback, which stays live even when the backgrounded game's _process is
+## frozen — so it's the reliable channel for reporting a runtime error that
+## aborted the eval. Report if one is detected for this request, else stay
+## silent (the editor keeps polling until the real reply or the hang timeout).
+func _handle_eval_check(data: Array) -> void:
+	var request_id: String = data[0] if data.size() > 0 else ""
+	if request_id.is_empty():
+		return
+	_try_report_eval_runtime_error(request_id)
 
 
 func _indent_eval_code(code: String) -> String:
