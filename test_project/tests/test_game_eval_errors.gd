@@ -394,3 +394,28 @@ func test_eval_grace_noop_when_already_compiled() -> void:
 	assert_true(plugin._pending.has(rid), "a compiled eval is untouched by the grace timer")
 	assert_eq(conn.captured.size(), 0, "no compile error for a compiled eval")
 	conn.free()
+
+
+func test_send_eval_without_active_session_replies_game_not_ready() -> void:
+	## #518: with no live debugger session, _send_eval replies with the
+	## caller-actionable EVAL_GAME_NOT_READY rather than the opaque INTERNAL_ERROR
+	## that the telemetry bucket now reserves for a genuine ~10s eval hang. (The
+	## no-session branch returns before touching `tree`, so a bare plugin is safe.)
+	var tree := Engine.get_main_loop() as SceneTree
+	if tree == null:
+		skip("No SceneTree available")
+		return
+	var plugin := McpDebuggerPlugin.new()
+	## Gate BEFORE calling _send_eval: a bare plugin normally has no session, but
+	## if one were present _send_eval would take its live path (arm timers, send a
+	## real mcp:eval into the running game). Skip first so the test never has side
+	## effects in that case rather than bailing after the fact.
+	if plugin._first_active_session() != null:
+		skip("an active debugger session is present; no-session branch not exercised")
+		return
+	var conn := _StubConnection.new()
+	plugin._send_eval(tree, "return 1", "rid-no-session", conn, 10.0)
+	assert_eq(conn.captured.size(), 1, "exactly one deferred reply is sent")
+	assert_eq(conn.captured[0]["payload"]["error"]["code"], ErrorCodes.EVAL_GAME_NOT_READY,
+		"no active debugger session replies with EVAL_GAME_NOT_READY, not INTERNAL_ERROR")
+	conn.free()
