@@ -183,8 +183,11 @@ async def performance_monitors_get(
     return await runtime.send_command("get_performance_monitors", params)
 
 
-async def logs_clear(runtime: DirectRuntime) -> dict:
-    return await runtime.send_command("clear_logs")
+async def logs_clear(runtime: DirectRuntime, clear_debugger_errors: bool = False) -> dict:
+    params: dict = {}
+    if clear_debugger_errors:
+        params["clear_debugger_errors"] = True
+    return await runtime.send_command("clear_logs", params)
 
 
 _VALID_LOG_SOURCES = ("plugin", "game", "editor", "all")
@@ -196,6 +199,7 @@ async def logs_read(
     offset: int = 0,
     source: str = "plugin",
     since_run_id: str = "",
+    include_details: bool = False,
 ) -> dict:
     if source not in _VALID_LOG_SOURCES:
         raise ValueError(f"Invalid source '{source}' — use 'plugin', 'game', 'editor', or 'all'")
@@ -219,11 +223,15 @@ async def logs_read(
                 flat.append(str(entry))
         return paginate(flat, offset, count, key="lines")
 
-    ## game / all: ask the plugin to apply offset+count itself so the
+    ## game / editor / all: ask the plugin to apply offset+count itself so the
     ## ring buffer's run_id, dropped_count, and is_running stay
     ## authoritative on the editor side.
+    params = {"count": count, "offset": offset, "source": source}
+    if include_details:
+        params["include_details"] = True
     result = await runtime.send_command(
-        "get_logs", {"count": count, "offset": offset, "source": source}
+        "get_logs",
+        params,
     )
     run_id = result.get("run_id", "")
     if since_run_id and run_id and run_id != since_run_id:
