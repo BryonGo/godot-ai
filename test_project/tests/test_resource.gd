@@ -347,9 +347,16 @@ func test_get_resource_info_concrete_type_box_mesh() -> void:
 	assert_false(result.data.is_abstract)
 	assert_gt(result.data.property_count, 0)
 	var prop_names: Array = []
+	var size_prop: Dictionary = {}
 	for p in result.data.properties:
 		prop_names.append(p.name)
+		if p.name == "size":
+			size_prop = p
 	assert_contains(prop_names, "size", "BoxMesh.size must appear in properties")
+	assert_has_key(size_prop, "default")
+	assert_eq(size_prop.default.x, 1.0)
+	assert_eq(size_prop.default.y, 1.0)
+	assert_eq(size_prop.default.z, 1.0)
 
 
 func test_get_resource_info_concrete_type_cylinder_mesh() -> void:
@@ -385,6 +392,18 @@ func test_get_resource_info_properties_sorted() -> void:
 	var sorted_names := names.duplicate()
 	sorted_names.sort()
 	assert_eq(names, sorted_names, "properties should be sorted alphabetically by name")
+
+
+func test_get_resource_info_includes_hint_string() -> void:
+	var result := _handler.get_resource_info({"type": "BaseMaterial3D"})
+	assert_has_key(result, "data")
+	var shading_mode: Dictionary = {}
+	for prop in result.data.properties:
+		if prop.name == "shading_mode":
+			shading_mode = prop
+			break
+	assert_false(shading_mode.is_empty(), "shading_mode property should be present")
+	assert_contains(shading_mode.hint_string, "Unshaded")
 
 
 func test_create_resource_saves_to_disk() -> void:
