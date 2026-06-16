@@ -57,6 +57,12 @@ async def game_get_ui_elements(
     return await _game_command(runtime, "get_ui_elements", params)
 
 
+async def game_get_runtime_errors(
+    runtime: DirectRuntime,
+) -> dict:
+    return await _game_command(runtime, "get_runtime_errors", {})
+
+
 async def game_input_key(
     runtime: DirectRuntime,
     key: str,

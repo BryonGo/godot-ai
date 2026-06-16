@@ -211,6 +211,8 @@ func _handle_game_command(data: Array) -> void:
 			result = _game_get_node_info(json.data)
 		"get_ui_elements":
 			result = _game_get_ui_elements(json.data)
+		"get_runtime_errors":
+			result = _game_get_runtime_errors(json.data)
 		"input_key":
 			result = _game_input_key(json.data)
 		"input_mouse":
@@ -296,6 +298,26 @@ func _game_get_ui_elements(params: Dictionary) -> Dictionary:
 		"root": _runtime_path(root),
 		"elements": elements,
 		"total_count": elements.size(),
+	}
+
+
+## Expose the most recent runtime script error via MCP so clients can
+## inspect the latest game-side failure without scraping the full log buffer.
+func _game_get_runtime_errors(_params: Dictionary) -> Dictionary:
+	var last_script_error := ""
+	var script_error_seq := 0
+	if _logger != null:
+		last_script_error = _logger.last_script_error_text()
+		script_error_seq = _logger.script_error_seq()
+
+	return {
+		"has_script_error": not last_script_error.is_empty(),
+		"last_script_error": last_script_error,
+		"script_error_seq": script_error_seq,
+		"logger_attached": _logger_attached,
+		"debugger_active": EngineDebugger.is_active(),
+		"pending_log_entries": _pending_outbound.size(),
+		"hello_retry_frames_left": _hello_retry_frames_left,
 	}
 
 

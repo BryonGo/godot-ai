@@ -39,6 +39,8 @@ const MIN_PORT := 1024
 const MAX_PORT := 65535
 const SETTING_WS_PORT := "godot_ai/ws_port"
 const SETTING_STARTUP_TRACE := "godot_ai/log_startup_timing"
+const SERVER_SOURCE_OVERRIDE_ENV := "GODOT_AI_SERVER_SOURCE"
+const SETTING_SERVER_SOURCE_OVERRIDE := "godot_ai/server_source_override"
 
 
 ## Active HTTP port: user override (if in range) or `DEFAULT_HTTP_PORT`.
@@ -77,6 +79,7 @@ static func ensure_settings_registered() -> void:
 	_register_port_setting(es, McpSettings.SETTING_HTTP_PORT, DEFAULT_HTTP_PORT)
 	_register_port_setting(es, SETTING_WS_PORT, DEFAULT_WS_PORT)
 	_register_bool_setting(es, SETTING_STARTUP_TRACE, false)
+	_register_string_setting(es, SETTING_SERVER_SOURCE_OVERRIDE, "")
 
 
 static func _register_port_setting(es: EditorSettings, key: String, default_port: int) -> void:
@@ -101,6 +104,16 @@ static func _register_bool_setting(es: EditorSettings, key: String, default_valu
 	})
 
 
+static func _register_string_setting(es: EditorSettings, key: String, default_value: String) -> void:
+	if not es.has_setting(key):
+		es.set_setting(key, default_value)
+	es.set_initial_value(key, default_value, false)
+	es.add_property_info({
+		"name": key,
+		"type": TYPE_STRING,
+	})
+
+
 static func startup_trace_enabled() -> bool:
 	var raw := OS.get_environment(STARTUP_TRACE_ENV).strip_edges().to_lower()
 	if raw == "1" or raw == "true" or raw == "yes" or raw == "on":
@@ -110,6 +123,18 @@ static func startup_trace_enabled() -> bool:
 		if es != null and es.has_setting(SETTING_STARTUP_TRACE):
 			return bool(es.get_setting(SETTING_STARTUP_TRACE))
 	return false
+
+
+## 中文约束：允许通过 EditorSettings 或环境变量覆盖 uvx 的 `--from` 来源，
+## 这样插件自动拉起服务时就可以直接指向用户自己的 fork，而不是固定 PyPI 包。
+static func server_source_override() -> String:
+	if Engine.is_editor_hint():
+		var es := EditorInterface.get_editor_settings()
+		if es != null and es.has_setting(SETTING_SERVER_SOURCE_OVERRIDE):
+			var setting_val := str(es.get_setting(SETTING_SERVER_SOURCE_OVERRIDE)).strip_edges()
+			if not setting_val.is_empty():
+				return setting_val
+	return OS.get_environment(SERVER_SOURCE_OVERRIDE_ENV).strip_edges()
 
 
 ## Read the `godot_ai/excluded_domains` EditorSetting as a canonicalized
@@ -439,6 +464,7 @@ static func get_server_command(refresh: bool = false) -> Array[String]:
 	var uvx := find_uvx()
 	if not uvx.is_empty():
 		var version := get_plugin_version()
+		var source_override := server_source_override()
 		## Pin to the EXACT plugin version rather than `~=<minor>`. Under the
 		## tilde form, uvx was happy to reuse a cached tool env that matched
 		## the minor constraint — so an install that first spawned 1.2.0 kept
@@ -447,11 +473,12 @@ static func get_server_command(refresh: bool = false) -> Array[String]:
 		## otherwise uvx installs the exact version fresh. Keeps plugin and
 		## server version in lockstep without needing `--refresh-package` on
 		## every spawn. See issue #133.
-		print("MCP | using uvx (godot-ai==%s)%s" % [version, " [refresh]" if refresh else ""])
+		var package_spec := "godot-ai==%s" % version if source_override.is_empty() else source_override
+		print("MCP | using uvx (%s)%s" % [package_spec, " [refresh]" if refresh else ""])
 		var cmd: Array[String] = [uvx]
 		if refresh:
 			cmd.append("--refresh")
-		cmd.append_array(["--from", "godot-ai==%s" % version, "godot-ai"])
+		cmd.append_array(["--from", package_spec, "godot-ai"])
 		return cmd
 
 	var system_cmd := _find_system_install()
