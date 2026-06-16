@@ -213,6 +213,8 @@ func _handle_game_command(data: Array) -> void:
 			result = _game_get_ui_elements(json.data)
 		"get_runtime_errors":
 			result = _game_get_runtime_errors(json.data)
+		"get_error_summary":
+			result = _game_get_error_summary(json.data)
 		"input_key":
 			result = _game_input_key(json.data)
 		"input_mouse":
@@ -318,6 +320,48 @@ func _game_get_runtime_errors(_params: Dictionary) -> Dictionary:
 		"debugger_active": EngineDebugger.is_active(),
 		"pending_log_entries": _pending_outbound.size(),
 		"hello_retry_frames_left": _hello_retry_frames_left,
+	}
+
+
+## 中文约束：为自动化提供稳定的结构化错误摘要，减少外层每次再拼
+## editor_state / get_runtime_errors / logs_read 的成本。
+func _game_get_error_summary(params: Dictionary) -> Dictionary:
+	var recent_limit := maxi(0, int(params.get("recent_limit", 5)))
+	var last_script_error := ""
+	var script_error_seq := 0
+	var recent_script_errors: Array = []
+
+	if _logger != null:
+		last_script_error = _logger.last_script_error_text()
+		script_error_seq = _logger.script_error_seq()
+		if _logger.has_method("recent_script_errors"):
+			recent_script_errors = _logger.recent_script_errors(recent_limit)
+
+	var has_script_error := not last_script_error.is_empty()
+	var pending_log_entries := _pending_outbound.size()
+	var debugger_active := EngineDebugger.is_active()
+	var severity := "ok"
+	if has_script_error:
+		severity = "error"
+	elif pending_log_entries > 0 or not debugger_active or not _logger_attached:
+		severity = "warn"
+
+	return {
+		"healthy": severity == "ok",
+		"severity": severity,
+		"debugger_active": debugger_active,
+		"logger_attached": _logger_attached,
+		"pending_log_entries": pending_log_entries,
+		"hello_retry_frames_left": _hello_retry_frames_left,
+		"script_error": {
+			"has_error": has_script_error,
+			"seq": script_error_seq,
+			"last_text": last_script_error,
+			"recent": recent_script_errors,
+		},
+		"log_counters": {
+			"recent_script_error_count": recent_script_errors.size(),
+		},
 	}
 
 

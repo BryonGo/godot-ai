@@ -26,6 +26,8 @@ Ops:
         type, text where present, disabled state, and rect metadata.
   - get_runtime_errors()
         Read the last script runtime error captured by the game-side logger.
+  - get_error_summary(recent_limit=5)
+        Read a structured runtime error summary for automation checks.
   - input_key(key, pressed=True, echo=False)
         Send a key press/release to the running game.
   - input_mouse(event, position=None, button="left", pressed=True)
@@ -46,6 +48,7 @@ def register_game_tools(mcp: FastMCP) -> None:
             "get_node_info": game_handlers.game_get_node_info,
             "get_ui_elements": game_handlers.game_get_ui_elements,
             "get_runtime_errors": game_handlers.game_get_runtime_errors,
+            "get_error_summary": game_handlers.game_get_error_summary,
             "input_key": game_handlers.game_input_key,
             "input_mouse": game_handlers.game_input_mouse,
             "input_gamepad": game_handlers.game_input_gamepad,
@@ -56,6 +59,7 @@ def register_game_tools(mcp: FastMCP) -> None:
             "get_node_info": None,
             "get_ui_elements": None,
             "get_runtime_errors": None,
+            "get_error_summary": None,
             "input_key": None,
             "input_mouse": None,
             "input_gamepad": None,

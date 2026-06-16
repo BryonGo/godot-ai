@@ -139,6 +139,24 @@ func last_script_error_text() -> String:
 	return v
 
 
+## 中文约束：返回最近若干条脚本运行时错误，给自动化脚本直接消费。
+## 每条记录只保留稳定字段，避免外层再去日志文本里二次解析。
+func recent_script_errors(limit: int = 5) -> Array:
+	_mutex.lock()
+	var safe_limit := maxi(0, limit)
+	var start := maxi(0, _recent_script_errors.size() - safe_limit)
+	var out: Array = []
+	for i in range(start, _recent_script_errors.size()):
+		var rec: Dictionary = _recent_script_errors[i]
+		out.append({
+			"seq": int(rec.get("seq", 0)),
+			"text": str(rec.get("text", "")),
+			"functions": PackedStringArray(rec.get("funcs", PackedStringArray())),
+		})
+	_mutex.unlock()
+	return out
+
+
 ## #490: text of the most recent script error with seq > since_seq whose
 ## backtrace includes `function_name`, or "" if none. Lets game_helper
 ## attribute a runtime error to the exact eval whose uniquely named wrapper
