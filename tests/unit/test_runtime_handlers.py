@@ -8,6 +8,7 @@ import pytest
 
 from godot_ai import runtime_info
 from godot_ai.handlers import animation as animation_handlers
+from godot_ai.handlers import api as api_handlers
 from godot_ai.handlers import audio as audio_handlers
 from godot_ai.handlers import autoload as autoload_handlers
 from godot_ai.handlers import batch as batch_handlers
@@ -68,12 +69,24 @@ class StubClient:
         if command == "get_logs":
             params_dict = params or {}
             source = params_dict.get("source", "plugin")
+            include_details = bool(params_dict.get("include_details", False))
             if source == "game":
                 req_offset = int(params_dict.get("offset", 0))
                 req_count = int(params_dict.get("count", 50))
                 all_entries = [
                     {"source": "game", "level": "info", "text": f"game {i}"} for i in range(5)
                 ]
+                if include_details:
+                    for entry in all_entries:
+                        entry["details"] = {
+                            "code": entry["text"],
+                            "rationale": "",
+                            "error_type": 0,
+                            "error_type_name": "error",
+                            "source": {"path": "", "line": 0, "function": ""},
+                            "resolved": {"path": "", "line": 0, "function": ""},
+                            "frames": [],
+                        }
                 page = all_entries[req_offset : req_offset + req_count]
                 return {
                     "source": "game",
@@ -99,6 +112,31 @@ class StubClient:
                     }
                     for i in range(3)
                 ]
+                if include_details:
+                    for entry in all_entries:
+                        entry["details"] = {
+                            "code": entry["text"],
+                            "rationale": "",
+                            "error_type": 2,
+                            "error_type_name": "script",
+                            "source": {
+                                "path": "core/variant/variant_utility.cpp",
+                                "line": 1000,
+                                "function": "push_error",
+                            },
+                            "resolved": {
+                                "path": entry["path"],
+                                "line": entry["line"],
+                                "function": entry["function"],
+                            },
+                            "frames": [
+                                {
+                                    "path": entry["path"],
+                                    "line": entry["line"],
+                                    "function": entry["function"],
+                                }
+                            ],
+                        }
                 page = all_entries[req_offset : req_offset + req_count]
                 return {
                     "source": "editor",
@@ -250,6 +288,17 @@ class StubClient:
                 "is_abstract": False,
                 "properties": [{"name": "size", "type": "Vector3", "hint": 0, "usage": 4}],
                 "property_count": 1,
+            }
+        if command == "get_class_info":
+            return {
+                "class_name": params.get("class_name", ""),
+                "parent_class": "PhysicsBody3D",
+                "inheritance_chain": ["CharacterBody3D", "PhysicsBody3D", "Node"],
+                "properties": [],
+                "methods": [],
+                "signals": [],
+                "enums": [],
+                "constants": [],
             }
         if command == "open_scene":
             return {"path": params.get("path", ""), "undoable": False}
@@ -1347,6 +1396,30 @@ async def test_logs_read_handler_source_editor_passes_through():
     assert result["has_more"] is False
 
 
+async def test_logs_read_handler_include_details_passes_through():
+    client = StubClient()
+    runtime = DirectRuntime(registry=SessionRegistry(), client=client)
+
+    result = await editor_handlers.logs_read(
+        runtime,
+        count=1,
+        offset=0,
+        source="editor",
+        include_details=True,
+    )
+
+    last_call = client.calls[-1]
+    assert last_call["command"] == "get_logs"
+    assert last_call["params"] == {
+        "count": 1,
+        "offset": 0,
+        "source": "editor",
+        "include_details": True,
+    }
+    assert result["lines"][0]["details"]["error_type_name"] == "script"
+    assert result["lines"][0]["details"]["frames"][0]["path"] == "res://script_0.gd"
+
+
 async def test_logs_read_handler_plugin_normalizes_structured_payload():
     ## A plugin upgrade ships structured entries even for source=plugin;
     ## the public Python API still returns the legacy [str] shape for that
@@ -1482,9 +1555,7 @@ async def test_game_input_gamepad_axis_sends_value_not_pressed():
     client = StubClient()
     runtime = DirectRuntime(registry=SessionRegistry(), client=client)
 
-    await game_handlers.game_input_gamepad(
-        runtime, device=2, control="axis", index=1, value=0.5
-    )
+    await game_handlers.game_input_gamepad(runtime, device=2, control="axis", index=1, value=0.5)
 
     params = client.calls[-1]["params"]["params"]
     assert client.calls[-1]["params"]["op"] == "input_gamepad"
@@ -2618,6 +2689,43 @@ async def test_resource_get_info_handler_forwards_type():
     assert any(p["name"] == "size" for p in result["properties"])
 
 
+async def test_api_get_class_handler_forwards_class_name():
+    client = StubClient()
+    runtime = DirectRuntime(registry=SessionRegistry(), client=client)
+    result = await api_handlers.api_get_class(runtime, class_name="CharacterBody3D")
+    assert client.calls[-1]["command"] == "get_class_info"
+    assert client.calls[-1]["params"] == {
+        "class_name": "CharacterBody3D",
+        "include_inherited": False,
+        "include_inheritors": False,
+        "offset": 0,
+        "limit": 100,
+    }
+    assert result["class_name"] == "CharacterBody3D"
+
+
+async def test_api_get_class_handler_forwards_options():
+    client = StubClient()
+    runtime = DirectRuntime(registry=SessionRegistry(), client=client)
+    await api_handlers.api_get_class(
+        runtime,
+        class_name="Control",
+        sections=["properties"],
+        include_inherited=True,
+        include_inheritors=True,
+        offset=100,
+        limit=50,
+    )
+    assert client.calls[-1]["params"] == {
+        "class_name": "Control",
+        "sections": ["properties"],
+        "include_inherited": True,
+        "include_inheritors": True,
+        "offset": 100,
+        "limit": 50,
+    }
+
+
 async def test_curve_set_points_inline_handler():
     client = StubClient()
     runtime = DirectRuntime(registry=SessionRegistry(), client=client)
@@ -3145,6 +3253,15 @@ async def test_logs_clear_handler():
     result = await editor_handlers.logs_clear(runtime)
     assert result["cleared_count"] == 5
     assert client.calls[-1]["command"] == "clear_logs"
+    assert client.calls[-1]["params"] == {}
+
+
+async def test_logs_clear_handler_passes_clear_debugger_errors_opt_in():
+    client = StubClient()
+    runtime = DirectRuntime(registry=SessionRegistry(), client=client)
+    await editor_handlers.logs_clear(runtime, clear_debugger_errors=True)
+    assert client.calls[-1]["command"] == "clear_logs"
+    assert client.calls[-1]["params"] == {"clear_debugger_errors": True}
 
 
 # ---------------------------------------------------------------------------

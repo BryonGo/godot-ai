@@ -1,6 +1,6 @@
 # Available Tools
 
-Godot AI exposes ~39 MCP tools — ~18 high-traffic verbs as named tools, plus
+Godot AI exposes ~41 MCP tools — ~18 high-traffic verbs as named tools, plus
 one rolled-up `<domain>_manage` per domain that takes `op="..."` + a `params`
 dict. The rollup pattern keeps the tool count well below the 100-tool caps
 some clients enforce while still exposing every action.
@@ -29,10 +29,33 @@ not the MCP tool names.
 | `script_create` / `script_attach` / `script_patch` | Create, attach, anchor-edit GDScript files |
 | `project_run` | Play the project (autosave persists in-memory MCP edits unless `autosave=False`) |
 | `test_run` | Run GDScript test suites in the editor |
-| `logs_read` | Read plugin / game / editor / combined log buffers. `source="editor"` surfaces parse errors + @tool/EditorPlugin runtime errors + push_error/push_warning (Godot 4.5+, filtered to user .gd/.cs) — use this when the editor's Output panel shows red lines but `logs_read` returned nothing |
+| `logs_read` | Read plugin / game / editor / combined log buffers. `source="editor"` surfaces parse errors, GDScript reload warnings, @tool/EditorPlugin runtime errors, push_error/push_warning, and visible Debugger dock Errors-tab rows — use this when the editor's Output or Debugger Errors panel shows red/yellow rows |
 | `editor_screenshot` | Capture editor viewport, cinematic camera, or running game framebuffer |
 | `editor_reload_plugin` | Reload the plugin and wait for reconnect (server must be external) |
 | `animation_create` | Create an Animation clip (auto-creates AnimationPlayer + library if missing) |
+
+`logs_read` also accepts `include_details=true` for `source="editor"`,
+`source="game"`, and `source="all"`. Detailed entries include the original
+Godot `_log_error` code/rationale when available, error type, resolved source
+location, and stack/error-tree context corresponding to the Debugger dock's
+Errors tab.
+
+`editor_manage(op="logs_clear")` accepts `clear_debugger_errors=true` to also
+clear the Debugger dock's visible Errors-tab rows (routed through the panel's
+own Clear path so the tab badge and counters reset). The Errors panel is
+user-facing UI, so the default leaves it untouched.
+
+`script_create` and `script_patch` validate written `.gd` content before the
+editor import step and include per-write diagnostics in their response:
+`diagnostics` (array of structured editor-style entries), `diagnostics_scope`
+(`"this_file"`), `diagnostics_status` (`"checked"` or `"partial"` if the scoped
+validation log window overflowed), and `diagnostics_detail`.
+`diagnostics_detail` is `"log_capture"` when Godot 4.5+'s Logger API supplied
+real parse diagnostics for the written file, `"fallback"` when validation failed
+but Logger details were unavailable (for example on Godot < 4.5), and `"none"`
+when no diagnostics were reported. Fallback diagnostics still prove the content
+failed validation, but their line number is a best-effort hint marked with
+`details.fallback_line`.
 
 ## Domain rollups (`<domain>_manage`)
 
@@ -71,7 +94,16 @@ Calls take the form:
 | `theme_manage` | `create`, `set_color`, `set_constant`, `set_font_size`, `set_stylebox_flat`, `apply` |
 | `ui_manage` | `set_anchor_preset`, `set_text`, `build_layout`, `draw_recipe` |
 | `resource_manage` | `search`, `load`, `assign`, `get_info`, `create`, `curve_set_points`, `environment_create`, `physics_shape_autofit`, `gradient_texture_create`, `noise_texture_create` |
+| `api_manage` | `get_class` |
 | `client_manage` | `status`, `configure`, `remove` |
+
+`api_manage(op="get_class")` inspects Godot API/ClassDB metadata for a class
+without creating an instance. By default it returns direct class members only,
+with each returned section capped at 100 items. Pass `sections` (`properties`,
+`methods`, `signals`, `enums`, `constants`, `inheritors`),
+`include_inherited=true`, `include_inheritors=true`, `offset`, or `limit=0`
+when a fuller class reference is needed. When paginating, request one section
+at a time so `offset`/`limit` apply only to the list you are paging.
 
 Every rolled-up tool also accepts an optional top-level `session_id` for
 per-call multi-editor routing (sibling of `op` and `params`, *not* nested
@@ -95,6 +127,7 @@ don't, and the only path that supports `session_id` pinning.
 | `godot://node/{path}/properties` | All properties of a node by scene path |
 | `godot://node/{path}/children` | Direct children (name, type, path each) |
 | `godot://node/{path}/groups` | Group memberships for a node |
+| `godot://class/{class_name}` | ClassDB metadata: properties, methods, signals, enums, constants, inheritance, and defaults |
 | `godot://script/{path}` | GDScript source by res:// path (drop the `res://` prefix) |
 | `godot://project/info` | Active project metadata |
 | `godot://project/settings` | Common project settings subset |

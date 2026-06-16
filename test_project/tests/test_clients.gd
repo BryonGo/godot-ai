@@ -820,6 +820,43 @@ func test_json_strategy_preserves_other_servers() -> void:
 	assert_true(parsed["mcpServers"].has("godot-ai"), "Our entry not added")
 
 
+func test_json_strategy_preserves_integer_fields() -> void:
+	## Godot parses every JSON number as a float; a naive round-trip re-emits the
+	## user's integer fields (ports, counts) as "8080.0", which strict consumers
+	## reject and which churns numbers across the user's other entries. The
+	## strategy must re-narrow integral numbers so ints stay ints. (#528 / TC-2)
+	var path := _scratch_dir.path_join("ints.json")
+	var seed := {
+		"mcpServers": {"someone-else": {"url": "http://other/", "port": 8080, "retries": 3}},
+		"numStartups": 47,
+		"weights": [1, 2, 3],
+	}
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	f.store_string(JSON.stringify(seed))
+	f.close()
+
+	var client := _make_test_json_client(path)
+	var result := McpJsonStrategy.configure(client, "godot-ai", "http://127.0.0.1:8000/mcp")
+	assert_eq(result.get("status"), "ok")
+
+	var content_file := FileAccess.open(path, FileAccess.READ)
+	var content := content_file.get_as_text()
+	content_file.close()
+	# Integers must survive as integers — not be floatified to "8080.0".
+	assert_true(content.contains('"port": 8080'), "port int must be present")
+	assert_false(content.contains('"port": 8080.0'), "port must not become 8080.0")
+	assert_false(content.contains('"retries": 3.0'), "retries must not be floatified")
+	assert_false(content.contains('"numStartups": 47.0'), "top-level int must not be floatified")
+	# Check each element regardless of trailing comma/newline so a floatified
+	# last element ("3.0" with no comma) is also caught.
+	for floatified in ["1.0", "2.0", "3.0"]:
+		assert_false(content.contains(floatified), "array int must not be floatified (%s)" % floatified)
+	# Still valid JSON, other entry preserved, our entry added.
+	var parsed = JSON.parse_string(content)
+	assert_true(parsed["mcpServers"].has("someone-else"))
+	assert_true(parsed["mcpServers"].has("godot-ai"))
+
+
 func test_json_strategy_refuses_to_overwrite_unparseable_file() -> void:
 	## Regression: if the config file exists but we can't parse it (trailing
 	## comma, stray comment, truncated write), `configure()` used to silently
@@ -1399,6 +1436,113 @@ func test_atomic_write_preserves_existing_file_when_swap_fails() -> void:
 	assert_eq(got, orig, "original bytes must be recovered from .backup")
 	# Cleanup
 	DirAccess.remove_absolute(backup_path)
+
+
+# ----- atomic write: permission preservation (#297 finding TC-1) -----
+#
+# The Claude CLI creates ~/.claude.json as 0600 (it holds OAuth creds). A
+# rewrite must preserve that mode rather than relaxing it to the umask default,
+# and the .backup must not become a world-readable copy of a private file.
+# These bits don't exist on Windows, so the suite skips there.
+
+const _PERM_MASK := 0x1FF  # 0o777 — the rwx bits for owner/group/other
+
+
+func _owner_only_mode() -> int:
+	return FileAccess.UNIX_READ_OWNER | FileAccess.UNIX_WRITE_OWNER
+
+
+func test_atomic_write_preserves_restrictive_mode_on_rewrite() -> void:
+	if OS.get_name() == "Windows":
+		skip("POSIX file permissions are unavailable on Windows")
+		return
+	var path := _scratch_dir.path_join("perm_preserve_0600.txt")
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	f.store_string("secret v1")
+	f.close()
+	var owner_only := _owner_only_mode()
+	assert_eq(
+		FileAccess.set_unix_permissions(path, owner_only), OK, "test setup: chmod 0600 must succeed"
+	)
+
+	assert_true(McpAtomicWrite.write(path, "secret v2"))
+
+	assert_eq(
+		FileAccess.get_unix_permissions(path) & _PERM_MASK,
+		owner_only,
+		"a rewrite must preserve the prior 0600 mode, not relax it to 0644",
+	)
+	DirAccess.remove_absolute(path + ".backup")
+
+
+func test_atomic_write_backup_inherits_restrictive_mode() -> void:
+	if OS.get_name() == "Windows":
+		skip("POSIX file permissions are unavailable on Windows")
+		return
+	var path := _scratch_dir.path_join("perm_backup_0600.txt")
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	f.store_string("secret v1")
+	f.close()
+	var owner_only := _owner_only_mode()
+	assert_eq(FileAccess.set_unix_permissions(path, owner_only), OK, "test setup: chmod 0600")
+
+	assert_true(McpAtomicWrite.write(path, "secret v2"))
+
+	var backup_path := path + ".backup"
+	assert_true(FileAccess.file_exists(backup_path), "backup must exist")
+	assert_eq(
+		FileAccess.get_unix_permissions(backup_path) & _PERM_MASK,
+		owner_only,
+		"the .backup of a 0600 file must itself be 0600, not a world-readable copy",
+	)
+	DirAccess.remove_absolute(backup_path)
+
+
+func test_atomic_write_new_file_defaults_to_owner_only() -> void:
+	if OS.get_name() == "Windows":
+		skip("POSIX file permissions are unavailable on Windows")
+		return
+	var path := _scratch_dir.path_join("perm_new_file.txt")
+	# No prior file: nothing to preserve, so a fresh config defaults to 0600
+	# regardless of the process umask.
+	assert_false(FileAccess.file_exists(path), "test setup: target must not pre-exist")
+
+	assert_true(McpAtomicWrite.write(path, "fresh token config"))
+
+	assert_eq(
+		FileAccess.get_unix_permissions(path) & _PERM_MASK,
+		_owner_only_mode(),
+		"a brand-new config must default to owner-only 0600",
+	)
+
+
+func test_atomic_write_preserves_relaxed_mode_on_rewrite() -> void:
+	## We preserve the prior mode — we do NOT force 0600 on a file that was
+	## already group/other-readable (e.g. a 0644 cursor config). This proves
+	## the fix is "preserve", not "clamp everything to 0600".
+	if OS.get_name() == "Windows":
+		skip("POSIX file permissions are unavailable on Windows")
+		return
+	var path := _scratch_dir.path_join("perm_preserve_0644.txt")
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	f.store_string("public v1")
+	f.close()
+	var relaxed := (
+		FileAccess.UNIX_READ_OWNER
+		| FileAccess.UNIX_WRITE_OWNER
+		| FileAccess.UNIX_READ_GROUP
+		| FileAccess.UNIX_READ_OTHER
+	)  # 0644
+	assert_eq(FileAccess.set_unix_permissions(path, relaxed), OK, "test setup: chmod 0644")
+
+	assert_true(McpAtomicWrite.write(path, "public v2"))
+
+	assert_eq(
+		FileAccess.get_unix_permissions(path) & _PERM_MASK,
+		relaxed,
+		"a 0644 file must stay 0644 — preserve the prior mode, don't clamp to 0600",
+	)
+	DirAccess.remove_absolute(path + ".backup")
 
 
 # ----- handler -----

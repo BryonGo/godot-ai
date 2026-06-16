@@ -3,6 +3,7 @@ extends McpTestSuite
 
 const ErrorCodes := preload("res://addons/godot_ai/utils/error_codes.gd")
 
+const DiagnosticsCapture := preload("res://addons/godot_ai/utils/diagnostics_capture.gd")
 const EditorHandler := preload("res://addons/godot_ai/handlers/editor_handler.gd")
 const StubBacktrace := preload("res://addons/godot_ai/testing/stub_backtrace.gd")
 
@@ -112,6 +113,62 @@ func test_clear_logs_empties_buffer() -> void:
 	var result := handler.clear_logs({})
 	assert_eq(result.data.cleared_count, 2)
 	assert_eq(buf.total_count(), 0)
+
+
+func test_clear_logs_leaves_debugger_errors_tree_by_default() -> void:
+	var tree := _make_debugger_errors_tree()
+	var handler := EditorHandler.new(McpLogBuffer.new(), null, McpDebuggerPlugin.new(), null, null, tree)
+	var result := handler.clear_logs({})
+	assert_eq(result.data.cleared_count, 0)
+	assert_false(result.data.has("debugger_errors_cleared"), "Errors-tab clear is opt-in")
+	var logs := handler.get_logs({"source": "editor", "count": 10})
+	assert_eq(logs.data.total_count, 2, "Visible Errors rows must survive a default clear_logs")
+	tree.free()
+
+
+func test_clear_logs_clears_debugger_errors_tree_on_opt_in() -> void:
+	var tree := _make_debugger_errors_tree()
+	var handler := EditorHandler.new(McpLogBuffer.new(), null, McpDebuggerPlugin.new(), null, null, tree)
+	var result := handler.clear_logs({"clear_debugger_errors": true})
+	assert_eq(result.data.cleared_count, 0)
+	assert_eq(result.data.debugger_errors_cleared, 2)
+	var logs := handler.get_logs({"source": "editor", "count": 10})
+	assert_eq(logs.data.total_count, 0)
+	tree.free()
+
+
+class DebuggerClearStub:
+	extends RefCounted
+	var tree: Tree
+	var pressed_count := 0
+
+	func _clear_errors_list() -> void:
+		pressed_count += 1
+		tree.clear()
+
+
+func test_clear_logs_routes_through_debugger_clear_button() -> void:
+	## The real Errors panel must be cleared via its own Clear button so the
+	## engine resets error_count/warning_count, the tab badge, and button
+	## states — model the panel as button + tree under one container and
+	## assert the button's pressed path ran instead of a raw Tree.clear().
+	var panel := VBoxContainer.new()
+	var toolbar := HBoxContainer.new()
+	panel.add_child(toolbar)
+	var clear_button := Button.new()
+	toolbar.add_child(clear_button)
+	var tree := _make_debugger_errors_tree()
+	panel.add_child(tree)
+	var stub := DebuggerClearStub.new()
+	stub.tree = tree
+	clear_button.pressed.connect(stub._clear_errors_list)
+
+	var handler := EditorHandler.new(McpLogBuffer.new(), null, McpDebuggerPlugin.new(), null, null, panel)
+	var result := handler.clear_logs({"clear_debugger_errors": true})
+	assert_eq(result.data.debugger_errors_cleared, 2)
+	assert_eq(stub.pressed_count, 1, "Clear must go through the panel's own Clear button")
+	assert_true(tree.get_root() == null, "Button handler should have emptied the tree")
+	panel.free()
 
 
 # ----- get_performance_monitors -----
@@ -687,6 +744,18 @@ func test_game_log_buffer_unknown_level_coerces_to_info() -> void:
 	assert_eq(entries[0].level, "info", "Unknown level should coerce to info")
 
 
+func test_game_log_buffer_preserves_details() -> void:
+	var buf := McpGameLogBuffer.new()
+	buf.append("error", "boom", {
+		"code": "boom",
+		"frames": [{"path": "res://player.gd", "line": 8, "function": "_ready"}],
+	})
+	var entries := buf.get_range(0, 10)
+	assert_has_key(entries[0], "details")
+	assert_eq(entries[0].details.code, "boom")
+	assert_eq(entries[0].details.frames[0].path, "res://player.gd")
+
+
 func test_game_log_buffer_ring_evicts_and_tracks_dropped() -> void:
 	var buf := McpGameLogBuffer.new()
 	var cap := McpGameLogBuffer.MAX_LINES
@@ -821,15 +890,40 @@ func test_get_logs_source_game_empty_when_no_buffer() -> void:
 func test_get_logs_source_game_returns_buffered_entries() -> void:
 	var game_buf := McpGameLogBuffer.new()
 	game_buf.clear_for_new_run()
-	game_buf.append("info", "spawned 12 blocks")
+	game_buf.append("info", "spawned 12 blocks", {"code": "spawned"})
 	game_buf.append("error", "null deref")
 	var handler := EditorHandler.new(McpLogBuffer.new(), null, null, game_buf)
 	var result := handler.get_logs({"source": "game", "count": 10})
 	assert_eq(result.data.source, "game")
 	assert_eq(result.data.lines.size(), 2)
 	assert_eq(result.data.lines[0].text, "spawned 12 blocks")
+	assert_false(result.data.lines[0].has("details"), "Details are opt-in")
 	assert_eq(result.data.lines[1].level, "error")
 	assert_ne(result.data.run_id, "", "run_id should be set after clear_for_new_run")
+
+
+func test_get_logs_include_details_returns_buffered_metadata() -> void:
+	var game_buf := McpGameLogBuffer.new()
+	game_buf.append("error", "game boom", {
+		"code": "ERR_GAME",
+		"frames": [{"path": "res://game.gd", "line": 5, "function": "_tick"}],
+	})
+	var ed_buf := McpEditorLogBuffer.new()
+	ed_buf.append("error", "editor boom", "res://tool.gd", 9, "_run", {
+		"code": "ERR_EDITOR",
+		"frames": [{"path": "res://tool.gd", "line": 9, "function": "_run"}],
+	})
+	var handler := EditorHandler.new(McpLogBuffer.new(), null, null, game_buf, ed_buf)
+
+	var compact := handler.get_logs({"source": "all", "count": 10})
+	assert_false(compact.data.lines[0].has("details"), "Compact all-source logs strip details")
+	assert_false(compact.data.lines[1].has("details"), "Compact all-source logs strip details")
+
+	var detailed := handler.get_logs({"source": "all", "count": 10, "include_details": true})
+	assert_eq(detailed.data.lines[0].details.code, "ERR_EDITOR")
+	assert_eq(detailed.data.lines[0].details.frames[0].path, "res://tool.gd")
+	assert_eq(detailed.data.lines[1].details.code, "ERR_GAME")
+	assert_eq(detailed.data.lines[1].details.frames[0].function, "_tick")
 
 
 func test_get_logs_source_game_offset_applies() -> void:
@@ -899,6 +993,18 @@ func test_editor_log_buffer_missing_fields_default_to_empty() -> void:
 	assert_eq(e.function, "")
 
 
+func test_editor_log_buffer_preserves_details() -> void:
+	var buf := McpEditorLogBuffer.new()
+	buf.append("error", "Parse Error", "res://broken.gd", 12, "", {
+		"code": "Parse Error",
+		"frames": [{"path": "res://broken.gd", "line": 12, "function": ""}],
+	})
+	var e := buf.get_range(0, 1)[0]
+	assert_has_key(e, "details")
+	assert_eq(e.details.code, "Parse Error")
+	assert_eq(e.details.frames[0].line, 12)
+
+
 func test_editor_log_buffer_ring_evicts_and_tracks_dropped() -> void:
 	var buf := McpEditorLogBuffer.new()
 	var cap := McpEditorLogBuffer.MAX_LINES
@@ -906,19 +1012,184 @@ func test_editor_log_buffer_ring_evicts_and_tracks_dropped() -> void:
 		buf.append("error", "n %d" % i, "res://x.gd", i)
 	assert_eq(buf.total_count(), cap, "Buffer should cap at MAX_LINES")
 	assert_eq(buf.dropped_count(), 7, "Should record 7 evictions")
+	assert_eq(buf.appended_total(), cap + 7, "Cursor should advance for every append")
 	## Oldest 7 dropped: first remaining entry should be index 7.
 	var first := buf.get_range(0, 1)
 	assert_eq(first[0].text, "n 7")
 
 
-func test_editor_log_buffer_clear_resets_counts() -> void:
+func test_editor_log_buffer_get_since_returns_entries_after_cursor() -> void:
+	var buf := McpEditorLogBuffer.new()
+	buf.append("error", "before-a", "res://a.gd", 1)
+	buf.append("error", "before-b", "res://b.gd", 2)
+	var cursor := buf.appended_total()
+	buf.append("error", "after-a", "res://a.gd", 3)
+	buf.append("warn", "after-b", "res://b.gd", 4)
+
+	var result := buf.get_since(cursor)
+	assert_eq(result.cursor, cursor)
+	assert_eq(result.entries.size(), 2)
+	assert_eq(result.entries[0].text, "after-a")
+	assert_eq(result.entries[1].text, "after-b")
+	assert_eq(result.next_cursor, buf.appended_total())
+	assert_false(result.truncated)
+	assert_false(result.has_more)
+
+
+func test_editor_log_buffer_get_since_reports_overflow_truncation() -> void:
+	var buf := McpEditorLogBuffer.new()
+	var cap := McpEditorLogBuffer.MAX_LINES
+	var cursor := buf.appended_total()
+	for i in range(cap + 3):
+		buf.append("error", "storm %d" % i, "res://storm.gd", i)
+
+	var result := buf.get_since(cursor)
+	assert_true(result.truncated, "Overflow after the cursor must be visible")
+	assert_eq(result.entries.size(), cap)
+	assert_eq(result.entries[0].text, "storm 3")
+	assert_eq(result.entries[cap - 1].text, "storm %d" % (cap + 2))
+	assert_eq(result.oldest_cursor, 3)
+	assert_eq(result.next_cursor, buf.appended_total())
+
+
+func test_editor_log_buffer_get_since_limit_paginates_without_losing_cursor() -> void:
+	var buf := McpEditorLogBuffer.new()
+	for i in range(5):
+		buf.append("error", "page %d" % i)
+
+	var first := buf.get_since(0, 2)
+	assert_eq(first.entries.size(), 2)
+	assert_eq(first.entries[0].text, "page 0")
+	assert_eq(first.next_cursor, 2)
+	assert_true(first.has_more)
+
+	var second := buf.get_since(first.next_cursor, 10)
+	assert_eq(second.entries.size(), 3)
+	assert_eq(second.entries[0].text, "page 2")
+	assert_eq(second.next_cursor, 5)
+	assert_false(second.has_more)
+
+
+func test_editor_log_buffer_get_since_future_cursor_clamps_to_tail() -> void:
+	var buf := McpEditorLogBuffer.new()
+	for i in range(3):
+		buf.append("error", "future %d" % i)
+
+	var result := buf.get_since(99)
+	assert_false(result.truncated)
+	assert_eq(result.entries.size(), 0)
+	assert_eq(result.next_cursor, buf.appended_total())
+	assert_false(result.has_more)
+
+
+func test_editor_log_buffer_clear_resets_retained_counts_but_preserves_cursor() -> void:
 	var buf := McpEditorLogBuffer.new()
 	for i in range(5):
 		buf.append("error", "n %d" % i)
+	var cursor := buf.appended_total()
 	var cleared := buf.clear()
 	assert_eq(cleared, 5, "clear() should report cleared count")
 	assert_eq(buf.total_count(), 0)
 	assert_eq(buf.dropped_count(), 0)
+	assert_eq(buf.appended_total(), cursor, "clear() must not reset the cursor")
+
+
+func test_editor_log_buffer_get_since_reports_clear_truncation() -> void:
+	var buf := McpEditorLogBuffer.new()
+	for i in range(5):
+		buf.append("error", "before-clear %d" % i)
+	var stale_cursor := 2
+	buf.clear()
+	buf.append("error", "after-clear", "res://after.gd", 9)
+
+	var result := buf.get_since(stale_cursor)
+	assert_true(result.truncated, "Clear after the cursor should degrade the window")
+	assert_eq(result.entries.size(), 1)
+	assert_eq(result.entries[0].text, "after-clear")
+	assert_eq(result.oldest_cursor, 5)
+	assert_eq(result.next_cursor, 6)
+
+
+# ----- Diagnostics capture -----
+
+func test_diagnostics_capture_uses_details_source_for_target_match() -> void:
+	var buf := McpEditorLogBuffer.new()
+	var target := "res://scripts/player.gd"
+	var result := DiagnosticsCapture.capture_this_file(buf, target, func() -> Dictionary:
+		buf.append("error", "Parse Error: Expected statement", "res://addons/godot_ai/handlers/script_handler.gd", 55, "_validate", {
+			"source": {"path": target, "line": 7, "function": "GDScript::reload"},
+			"resolved": {"path": "res://addons/godot_ai/handlers/script_handler.gd", "line": 55, "function": "_validate"},
+		})
+		return {"ok": false, "error_code": ERR_PARSE_ERROR}
+	)
+
+	assert_eq(result.diagnostics_scope, "this_file")
+	assert_eq(result.diagnostics_status, "checked")
+	assert_eq(result.diagnostics_detail, "log_capture")
+	assert_eq(result.diagnostics.size(), 1)
+	assert_eq(result.diagnostics[0].path, target)
+	assert_eq(result.diagnostics[0].line, 7)
+	assert_eq(result.diagnostics[0].function, "GDScript::reload")
+	assert_eq(result.diagnostics[0].details.source.path, target)
+	assert_eq(result.diagnostics[0].details.resolved.path, "res://addons/godot_ai/handlers/script_handler.gd")
+
+
+func test_diagnostics_capture_excludes_load_wrapper_and_keeps_multiple_parse_errors() -> void:
+	var buf := McpEditorLogBuffer.new()
+	var target := "res://scripts/player.gd"
+	var result := DiagnosticsCapture.capture_this_file(buf, target, func() -> Dictionary:
+		buf.append("error", "Parse Error: first", "res://addons/godot_ai/handlers/script_handler.gd", 40, "_validate", {
+			"source": {"path": target, "line": 4, "function": "GDScript::reload"},
+		})
+		buf.append("error", "Failed to load script \"res://scripts/player.gd\" with error \"Parse error\".", "res://addons/godot_ai/handlers/script_handler.gd", 40, "_validate", {
+			"source": {"path": "modules/gdscript/gdscript.cpp", "line": 2907, "function": "load"},
+		})
+		buf.append("error", "Parse Error: second", "res://addons/godot_ai/handlers/script_handler.gd", 40, "_validate", {
+			"source": {"path": target, "line": 8, "function": "GDScript::reload"},
+		})
+		return {"ok": false, "error_code": ERR_PARSE_ERROR}
+	)
+
+	assert_eq(result.diagnostics_detail, "log_capture")
+	assert_eq(result.diagnostics.size(), 2)
+	assert_eq(result.diagnostics[0].text, "Parse Error: first")
+	assert_eq(result.diagnostics[0].line, 4)
+	assert_eq(result.diagnostics[1].text, "Parse Error: second")
+	assert_eq(result.diagnostics[1].line, 8)
+
+
+func test_diagnostics_capture_rejects_pathless_entries_for_other_files() -> void:
+	var buf := McpEditorLogBuffer.new()
+	var target := "res://scripts/player.gd"
+	var result := DiagnosticsCapture.capture_this_file(buf, target, func() -> Dictionary:
+		buf.append("error", "unrelated parse error", "", 0, "", {
+			"source": {"path": "res://scripts/other.gd", "line": 12},
+			"frames": [{"path": "res://scripts/other.gd", "line": 12, "function": "_ready"}],
+		})
+		return {"ok": false, "error_code": ERR_PARSE_ERROR}
+	)
+
+	assert_eq(result.diagnostics_detail, "none")
+	assert_eq(result.diagnostics, [])
+
+
+func test_diagnostics_capture_reports_partial_when_window_overflows() -> void:
+	var buf := McpEditorLogBuffer.new()
+	var cap := McpEditorLogBuffer.MAX_LINES
+	var target := "res://scripts/storm.gd"
+	var result := DiagnosticsCapture.capture_this_file(buf, target, func() -> Dictionary:
+		for i in range(cap + 2):
+			buf.append("error", "storm %d" % i, "res://addons/godot_ai/handlers/script_handler.gd", i, "_validate", {
+				"source": {"path": target, "line": i, "function": "GDScript::reload"},
+			})
+		return {"ok": false, "error_code": ERR_PARSE_ERROR}
+	)
+
+	assert_eq(result.diagnostics_status, "partial")
+	assert_eq(result.diagnostics_detail, "log_capture")
+	assert_eq(result.diagnostics_scope, "this_file")
+	assert_eq(result.diagnostics.size(), cap)
+	assert_eq(result.diagnostics[0].text, "storm 2")
 
 
 # ----- get_logs source="editor" routing (issue #231) -----
@@ -950,6 +1221,92 @@ func test_get_logs_source_editor_returns_buffered_entries() -> void:
 	assert_eq(result.data.lines[0].line, 17)
 	assert_eq(result.data.lines[1].level, "warn")
 	assert_eq(result.data.lines[1].function, "_compute")
+
+
+func test_get_logs_source_editor_reads_debugger_errors_tree() -> void:
+	var tree := _make_debugger_errors_tree()
+	var handler := EditorHandler.new(McpLogBuffer.new(), null, McpDebuggerPlugin.new(), null, null, tree)
+	var result := handler.get_logs({"source": "editor", "count": 10})
+	assert_eq(result.data.source, "editor")
+	assert_eq(result.data.total_count, 2)
+	assert_eq(result.data.lines[0].level, "warn")
+	assert_eq(result.data.lines[0].text, "GDScript::reload: The variable \"hash\" has the same name as a built-in function.")
+	assert_eq(result.data.lines[0].path, "res://scripts/player.gd")
+	assert_eq(result.data.lines[0].line, 21)
+	assert_eq(result.data.lines[0].function, "GDScript::reload")
+	assert_eq(result.data.lines[1].level, "error")
+	assert_eq(result.data.lines[1].path, "res://scripts/broken.gd")
+
+
+func test_get_logs_source_editor_details_include_debugger_errors_children() -> void:
+	var tree := _make_debugger_errors_tree()
+	var handler := EditorHandler.new(McpLogBuffer.new(), null, McpDebuggerPlugin.new(), null, null, tree)
+	var result := handler.get_logs({"source": "editor", "count": 1, "include_details": true})
+	var details: Dictionary = result.data.lines[0].details
+	assert_eq(details.debugger_tab, "Errors")
+	assert_eq(details.time, "0:00:00:776")
+	assert_eq(details.source.path, "res://scripts/player.gd")
+	assert_eq(details.children[0].label, "<GDScript Error>")
+	assert_eq(details.children[1].label, "<GDScript Source>")
+	assert_eq(details.frames.size(), 2, "Every stack row must land in frames, not just the labeled first one")
+	assert_eq(details.frames[0].path, "res://scripts/player.gd")
+	assert_eq(details.frames[0].function, "_ready")
+	assert_eq(details.frames[1].path, "res://scripts/main.gd")
+	assert_eq(details.frames[1].line, 12)
+	assert_eq(details.frames[1].function, "_start")
+	tree.free()
+
+
+func test_get_logs_details_frames_survive_translated_stack_trace_label() -> void:
+	## The "<Stack Trace>" label is TTR-translated, so frame detection must
+	## not depend on the English text: frames past the first are the only
+	## rows with an empty label and a real location, and the row before the
+	## first of those is the labeled first frame.
+	var tree := Tree.new()
+	tree.set_columns(2)
+	tree.set_hide_root(true)
+	var root := tree.create_item()
+	var error := tree.create_item(root)
+	error.set_meta("_is_error", true)
+	error.set_text(0, "0:00:01:002")
+	error.set_text(1, "_ready: boom")
+	error.set_metadata(0, ["res://scripts/player.gd", 8])
+	var source := tree.create_item(error)
+	source.set_text(0, "<GDScript-Quelle>")
+	source.set_text(1, "player.gd:8 @ _ready()")
+	source.set_metadata(0, ["res://scripts/player.gd", 8])
+	var frame_0 := tree.create_item(error)
+	frame_0.set_text(0, "<Stapelverfolgung>")
+	frame_0.set_text(1, "player.gd:8 @ _ready()")
+	frame_0.set_metadata(0, ["res://scripts/player.gd", 8])
+	var frame_1 := tree.create_item(error)
+	frame_1.set_text(1, "main.gd:3 @ _init()")
+	frame_1.set_metadata(0, ["res://scripts/main.gd", 3])
+
+	var handler := EditorHandler.new(McpLogBuffer.new(), null, McpDebuggerPlugin.new(), null, null, tree)
+	var result := handler.get_logs({"source": "editor", "count": 1, "include_details": true})
+	var frames: Array = result.data.lines[0].details.frames
+	assert_eq(frames.size(), 2)
+	assert_eq(frames[0].function, "_ready")
+	assert_eq(frames[1].function, "_init")
+	tree.free()
+
+
+func test_get_logs_source_editor_dedupes_debugger_errors_tree() -> void:
+	var ed_buf := McpEditorLogBuffer.new()
+	ed_buf.append(
+		"warn",
+		"GDScript::reload: The variable \"hash\" has the same name as a built-in function.",
+		"res://scripts/player.gd",
+		21,
+		"GDScript::reload",
+	)
+	var tree := _make_debugger_errors_tree()
+	var handler := EditorHandler.new(McpLogBuffer.new(), null, McpDebuggerPlugin.new(), null, ed_buf, tree)
+	var result := handler.get_logs({"source": "editor", "count": 10})
+	assert_eq(result.data.total_count, 2, "duplicate debugger row should not repeat the buffered warning")
+	assert_eq(result.data.lines[0].text, "GDScript::reload: The variable \"hash\" has the same name as a built-in function.")
+	assert_eq(result.data.lines[1].text, "Parse Error: Expected statement")
 
 
 func test_get_logs_source_editor_offset_applies() -> void:
@@ -1004,6 +1361,67 @@ func test_get_logs_source_invalid_message_lists_editor() -> void:
 	var result := handler.get_logs({"source": "bogus"})
 	assert_is_error(result)
 	assert_contains(result.error.message, "editor")
+
+
+## Mirrors ScriptEditorDebugger's real Errors-tab layout (verified against
+## script_editor_debugger.cpp on 4.3 and 4.6): children of an error item are
+## flat — optional "<X Error>" row, one "<X Source>" row, then one row per
+## stack frame. Only frame 0 carries the "<Stack Trace>" label; later frames
+## have an empty label. Frame text uses the file *name*, not the res:// path.
+func _make_debugger_errors_tree() -> Tree:
+	var tree := Tree.new()
+	tree.set_columns(2)
+	tree.set_hide_root(true)
+	var root := tree.create_item()
+
+	var warning := tree.create_item(root)
+	warning.set_meta("_is_warning", true)
+	warning.set_text(0, "0:00:00:776")
+	warning.set_text(1, "GDScript::reload: The variable \"hash\" has the same name as a built-in function.")
+	warning.set_metadata(0, ["res://scripts/player.gd", 21])
+	var warning_condition := tree.create_item(warning)
+	warning_condition.set_text(0, "<GDScript Error>")
+	warning_condition.set_text(1, "BUILTIN_SHADOWED")
+	warning_condition.set_metadata(0, ["res://scripts/player.gd", 21])
+	var warning_source := tree.create_item(warning)
+	warning_source.set_text(0, "<GDScript Source>")
+	warning_source.set_text(1, "player.gd:21 @ GDScript::reload()")
+	warning_source.set_metadata(0, ["res://scripts/player.gd", 21])
+	var warning_frame := tree.create_item(warning)
+	warning_frame.set_text(0, "<Stack Trace>")
+	warning_frame.set_text(1, "player.gd:21 @ _ready()")
+	warning_frame.set_metadata(0, ["res://scripts/player.gd", 21])
+	var warning_frame_2 := tree.create_item(warning)
+	warning_frame_2.set_text(1, "main.gd:12 @ _start()")
+	warning_frame_2.set_metadata(0, ["res://scripts/main.gd", 12])
+
+	var error := tree.create_item(root)
+	error.set_meta("_is_error", true)
+	error.set_text(0, "0:00:00:790")
+	error.set_text(1, "Parse Error: Expected statement")
+	error.set_metadata(0, ["res://scripts/broken.gd", 12])
+	return tree
+
+
+func test_log_backtrace_resolve_error_preserves_all_frames() -> void:
+	var bt := StubBacktrace.new("", 0, "", [
+		{"path": "res://player.gd", "line": 44, "function": "_take_damage"},
+		{"path": "res://main.gd", "line": 12, "function": "_ready"},
+	])
+	var resolved := McpLogBacktrace.resolve_error(
+		"push_error",
+		"core/variant/variant_utility.cpp",
+		1000,
+		"hp went negative",
+		"",
+		2,
+		[bt],
+	)
+	assert_eq(resolved.path, "res://player.gd")
+	assert_eq(resolved.details.error_type_name, "script")
+	assert_eq(resolved.details.source.path, "core/variant/variant_utility.cpp")
+	assert_eq(resolved.details.frames.size(), 2)
+	assert_eq(resolved.details.frames[1].function, "_ready")
 
 
 # ----- EditorLogger filtering (issue #231) -----
@@ -1154,6 +1572,10 @@ func test_editor_logger_uses_script_backtrace_for_push_error() -> void:
 	assert_eq(entries[0].line, 17)
 	assert_eq(entries[0].function, "_handle_event")
 	assert_contains(entries[0].text, "user-flagged-bug")
+	assert_eq(entries[0].details.error_type_name, "error")
+	assert_eq(entries[0].details.source.path, "core/variant/variant_utility.cpp")
+	assert_eq(entries[0].details.resolved.path, "res://user_tool.gd")
+	assert_eq(entries[0].details.frames[0].function, "_handle_event")
 
 
 func test_editor_logger_drops_push_error_from_plugin_via_backtrace() -> void:
@@ -1249,6 +1671,23 @@ func test_debugger_plugin_log_batch_appends_to_buffer() -> void:
 	var entries := game_buf.get_range(0, 10)
 	assert_eq(entries[0].text, "alpha")
 	assert_eq(entries[1].level, "error")
+
+
+func test_debugger_plugin_log_batch_preserves_details() -> void:
+	var game_buf := McpGameLogBuffer.new()
+	var plugin := McpDebuggerPlugin.new(null, game_buf)
+	plugin._capture("mcp:log_batch", [[
+		["error", "boom", {
+			"code": "ERR",
+			"frames": [{"path": "res://game.gd", "line": 21, "function": "_ready"}],
+		}],
+		{"level": "warn", "text": "dict-entry", "details": {"code": "WARN"}},
+	]], 0)
+	var entries := game_buf.get_range(0, 10)
+	assert_eq(entries.size(), 2)
+	assert_eq(entries[0].details.frames[0].path, "res://game.gd")
+	assert_eq(entries[1].level, "warn")
+	assert_eq(entries[1].details.code, "WARN")
 
 
 func test_debugger_plugin_hello_rotates_run_id() -> void:
@@ -1394,6 +1833,10 @@ func test_game_logger_uses_script_backtrace_for_push_error() -> void:
 	assert_contains(pending[0][1], "res://player.gd:88", "Backtrace path:line should land in the formatted text")
 	assert_contains(pending[0][1], "_take_damage", "Backtrace function should land in the formatted text")
 	assert_true(not pending[0][1].contains("variant_utility.cpp"), "C++ wrapper path should be replaced by the backtrace")
+	assert_eq(pending[0].size(), 3, "Runtime log batches carry optional details")
+	assert_eq(pending[0][2].source.path, "core/variant/variant_utility.cpp")
+	assert_eq(pending[0][2].resolved.path, "res://player.gd")
+	assert_eq(pending[0][2].frames[0].line, 88)
 
 
 func test_game_logger_falls_back_to_original_file_when_no_backtrace() -> void:
