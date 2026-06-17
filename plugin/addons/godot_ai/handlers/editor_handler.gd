@@ -94,6 +94,9 @@ func _get_plugin_logs(count: int, offset: int) -> Dictionary:
 	var stop := mini(all_lines.size(), offset + count)
 	for i in range(mini(offset, all_lines.size()), stop):
 		page.append({"source": "plugin", "level": "info", "text": all_lines[i]})
+	var appended_total := _log_buffer.total_logged()
+	var oldest_cursor := maxi(0, appended_total - all_lines.size())
+	var next_cursor := oldest_cursor + stop
 	return {
 		"data": {
 			"source": "plugin",
@@ -101,6 +104,12 @@ func _get_plugin_logs(count: int, offset: int) -> Dictionary:
 			"total_count": all_lines.size(),
 			"returned_count": page.size(),
 			"offset": offset,
+			"cursor": oldest_cursor + mini(offset, all_lines.size()),
+			"oldest_cursor": oldest_cursor,
+			"next_cursor": next_cursor,
+			"appended_total": appended_total,
+			"truncated": false,
+			"has_more": stop < all_lines.size(),
 		}
 	}
 

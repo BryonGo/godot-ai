@@ -221,7 +221,17 @@ async def logs_read(
                 flat.append(str(entry.get("text", "")))
             else:
                 flat.append(str(entry))
-        return paginate(flat, offset, count, key="lines")
+        page = paginate(flat, offset, count, key="lines")
+        return {
+            **page,
+            "source": "plugin",
+            "returned_count": len(page.get("lines", [])),
+            "cursor": int(result.get("cursor", 0)),
+            "oldest_cursor": int(result.get("oldest_cursor", 0)),
+            "next_cursor": int(result.get("next_cursor", 0)),
+            "appended_total": int(result.get("appended_total", page.get("total_count", len(flat)))),
+            "truncated": bool(result.get("truncated", False)),
+        }
 
     ## game / editor / all: ask the plugin to apply offset+count itself so the
     ## ring buffer's run_id, dropped_count, and is_running stay
