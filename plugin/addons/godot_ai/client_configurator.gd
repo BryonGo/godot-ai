@@ -125,9 +125,13 @@ static func startup_trace_enabled() -> bool:
 	return false
 
 
-## 中文约束：允许通过 EditorSettings 或环境变量覆盖 uvx 的 `--from` 来源，
-## 这样插件自动拉起服务时就可以直接指向用户自己的 fork，而不是固定 PyPI 包。
+## 中文约束：优先允许项目级配置覆盖 uvx 的 `--from` 来源，
+## 这样仓库内可以稳定绑定到指定 fork，不依赖本机全局 EditorSettings
+## 是否已经刷新到最新值；其次再回退到 EditorSettings / 环境变量。
 static func server_source_override() -> String:
+	var project_val := str(ProjectSettings.get_setting(SETTING_SERVER_SOURCE_OVERRIDE, "")).strip_edges()
+	if not project_val.is_empty():
+		return project_val
 	if Engine.is_editor_hint():
 		var es := EditorInterface.get_editor_settings()
 		if es != null and es.has_setting(SETTING_SERVER_SOURCE_OVERRIDE):

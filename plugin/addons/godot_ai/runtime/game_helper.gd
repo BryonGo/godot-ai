@@ -27,6 +27,8 @@ const FLUSH_BATCH_LIMIT := 200
 const LoggerLoader := preload("res://addons/godot_ai/runtime/logger_loader.gd")
 
 var _registered := false
+## 标记是否已经向编辑器发送过启动握手，避免重复发送 mcp:hello。
+var _hello_sent := false
 ## Untyped because the McpGameLogger script is loaded dynamically (it
 ## extends Logger, which only exists in Godot 4.5+).
 var _logger
@@ -79,13 +81,18 @@ func _ready() -> void:
 	## forwarder — handy when diagnosing why capture timed out.
 	print("[godot_ai game_helper] registered mcp capture (debugger active=%s, logger=%s)"
 		% [EngineDebugger.is_active(), _logger_attached])
-	## Boot beacon so the editor side can confirm the autoload ran even
-	## if no screenshot was ever requested.
-	if EngineDebugger.is_active():
-		EngineDebugger.send_message("mcp:hello", [])
+	## 启动握手用于告诉编辑器：游戏侧 helper 已经可用。
+	## 某些情况下 _ready() 触发时调试器尚未激活，此时不能只发一次，
+	## 否则编辑器会永久等不到 hello，后续所有 game_eval / game_command
+	## 都会误判成“游戏未就绪”。这里先尝试立即发送，失败则交给 _process()
+	## 做延迟补发。
+	_try_send_hello()
 
 
 func _process(_delta: float) -> void:
+	## 某些平台上调试器握手晚于 autoload 的 _ready()，这里做一次延迟
+	## 补发，保证编辑器最终一定能收到 mcp:hello。
+	_try_send_hello()
 	## Drain the logger queue on the main thread (Logger virtuals can fire
 	## from any thread; EngineDebugger.send_message is only safe from main).
 	## Send at most one FLUSH_BATCH_LIMIT-sized batch per frame so a runaway
@@ -113,6 +120,18 @@ func _exit_tree() -> void:
 		OS.call("remove_logger", _logger)
 		_logger_attached = false
 		_logger = null
+
+
+func _try_send_hello() -> void:
+	## 只在运行态、调试器激活后发送一次启动握手。
+	if _hello_sent:
+		return
+	if Engine.is_editor_hint():
+		return
+	if not EngineDebugger.is_active():
+		return
+	EngineDebugger.send_message("mcp:hello", [])
+	_hello_sent = true
 
 
 ## Dispatched for messages prefixed "mcp:" on the debugger channel.
@@ -319,7 +338,9 @@ func _game_get_runtime_errors(_params: Dictionary) -> Dictionary:
 		"logger_attached": _logger_attached,
 		"debugger_active": EngineDebugger.is_active(),
 		"pending_log_entries": _pending_outbound.size(),
-		"hello_retry_frames_left": _hello_retry_frames_left,
+		## 握手改为按帧持续补发后，这里保留一个稳定字段给外层，
+		## 用于区分“尚未发送”和“已经发送过 hello”。
+		"hello_sent": _hello_sent,
 	}
 
 
@@ -340,28 +361,59 @@ func _game_get_error_summary(params: Dictionary) -> Dictionary:
 	var has_script_error := not last_script_error.is_empty()
 	var pending_log_entries := _pending_outbound.size()
 	var debugger_active := EngineDebugger.is_active()
+	var ready_for_diagnose := _hello_sent and debugger_active and _logger_attached
 	var severity := "ok"
 	if has_script_error:
 		severity = "error"
-	elif pending_log_entries > 0 or not debugger_active or not _logger_attached:
+	elif pending_log_entries > 0 or not ready_for_diagnose:
 		severity = "warn"
 
+	## 中文约束：这里同时返回扁平字段和分组字段。
+	## 扁平字段方便现有脚本直接读取；
+	## capture/runtime/summary 则给自动化与后续扩展一个稳定结构，
+	## 避免外层再自行拼装“是否可诊断”“是否健康”等派生状态。
+	var script_error := {
+		"has_error": has_script_error,
+		"seq": script_error_seq,
+		"last_text": last_script_error,
+		"recent": recent_script_errors,
+	}
+	var capture := {
+		"registered": _hello_sent,
+		"hello_sent": _hello_sent,
+		"debugger_active": debugger_active,
+		"logger_attached": _logger_attached,
+		"pending_log_entries": pending_log_entries,
+	}
+	var runtime := {
+		"inflight_eval_count": _inflight_evals.size(),
+		"scene_root_name": get_tree().current_scene.name if get_tree() != null and get_tree().current_scene != null else "",
+		"scene_root_path": _runtime_path(get_tree().current_scene) if get_tree() != null and get_tree().current_scene != null else "",
+		"script_error": script_error,
+	}
+	var summary := {
+		"ready_for_diagnose": ready_for_diagnose,
+		"healthy": severity == "ok",
+		"severity": severity,
+		"has_script_error": has_script_error,
+	}
+
 	return {
+		"ready_for_diagnose": ready_for_diagnose,
 		"healthy": severity == "ok",
 		"severity": severity,
 		"debugger_active": debugger_active,
 		"logger_attached": _logger_attached,
 		"pending_log_entries": pending_log_entries,
-		"hello_retry_frames_left": _hello_retry_frames_left,
-		"script_error": {
-			"has_error": has_script_error,
-			"seq": script_error_seq,
-			"last_text": last_script_error,
-			"recent": recent_script_errors,
-		},
+		## 结构化暴露当前握手状态，供外层自动化判断运行态采集链是否已建立。
+		"hello_sent": _hello_sent,
+		"script_error": script_error,
 		"log_counters": {
 			"recent_script_error_count": recent_script_errors.size(),
 		},
+		"capture": capture,
+		"runtime": runtime,
+		"summary": summary,
 	}
 
 

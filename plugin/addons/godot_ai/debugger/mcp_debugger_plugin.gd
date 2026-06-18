@@ -102,6 +102,14 @@ func _has_capture(prefix: String) -> bool:
 ## plugin.gd's _enter_tree logs "plugin loaded", and ci-reload-test
 ## asserts "plugin loaded" is the first line after a plugin reload.
 func _setup_session(session_id: int) -> void:
+	## 中文约束：用户经常直接点编辑器的运行按钮，而不是走 MCP 的
+	## project_run。此时如果仍然要求 begin_game_run() 先执行，
+	## 后续收到的 mcp:hello 会被误判成“无活动 run”而丢弃。
+	## 这里在会话附着且编辑器已经处于 playing 时，自动接管这次运行，
+	## 让手动启动与 MCP 启动共用同一套握手链路。
+	if EditorInterface.is_playing_scene():
+		_adopt_external_game_run(session_id, "session_attach")
+		return
 	_game_ready = false
 	_ready_run_token = -1
 	_game_session_id = session_id
@@ -125,7 +133,25 @@ func end_game_run() -> void:
 
 
 func is_game_capture_ready() -> bool:
-	return _game_run_active and _game_ready and _ready_run_token == _game_run_token
+	return (
+		EditorInterface.is_playing_scene()
+		and _game_run_active
+		and _game_ready
+		and _ready_run_token == _game_run_token
+	)
+
+
+## 中文约束：统一接管“不是通过 MCP project_run 发起”的运行态。
+## 典型场景是用户手动点击编辑器的运行按钮，或者 Godot 恢复上一次
+## play 会话。此时也要创建 run token，避免后续 mcp:hello 被丢掉。
+func _adopt_external_game_run(session_id: int, reason: String) -> void:
+	_game_run_token += 1
+	_game_run_active = true
+	_game_ready = false
+	_ready_run_token = -1
+	_game_session_id = session_id
+	if _log_buffer:
+		_log_buffer.log("[debug] adopted external game run token %d (%s)" % [_game_run_token, reason])
 
 
 func _capture(message: String, data: Array, session_id: int) -> bool:
@@ -142,9 +168,15 @@ func _capture(message: String, data: Array, session_id: int) -> bool:
 			return true
 		"mcp:hello":
 			if not _game_run_active:
-				if _log_buffer:
-					_log_buffer.log("[debug] ignored mcp:hello with no active game run")
-				return true
+				## 中文约束：手动点 Play 时 begin_game_run() 不一定会先走到，
+				## 但如果编辑器当前确实处于 playing，就说明这是一个真实的新
+				## 游戏会话。这里直接接管，而不是把 hello 当成脏消息丢掉。
+				if EditorInterface.is_playing_scene():
+					_adopt_external_game_run(session_id, "hello")
+				else:
+					if _log_buffer:
+						_log_buffer.log("[debug] ignored mcp:hello with no active game run")
+					return true
 			if _game_session_id != -1 and session_id != _game_session_id:
 				if _log_buffer:
 					_log_buffer.log("[debug] ignored stale mcp:hello from debugger session %d (current %d)" % [session_id, _game_session_id])
