@@ -190,6 +190,18 @@ async def logs_clear(runtime: DirectRuntime, clear_debugger_errors: bool = False
     return await runtime.send_command("clear_logs", params)
 
 
+async def sync_disk_changes(runtime: DirectRuntime, scan: bool = True) -> dict:
+    """Acknowledge editor-side reload prompts and rescan the filesystem.
+
+    This is the MCP-safe recovery step after local file edits land on disk but
+    the editor is still showing "reload from disk" confirmation dialogs or has
+    not refreshed the filesystem dock yet.
+    """
+    await require_writable_async(runtime)
+    params: dict = {"scan": scan}
+    return await runtime.send_command("sync_disk_changes", params)
+
+
 _VALID_LOG_SOURCES = ("plugin", "game", "editor", "all")
 
 

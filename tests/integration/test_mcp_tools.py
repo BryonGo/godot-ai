@@ -518,6 +518,40 @@ class TestLogsReadTool:
 
 
 # ---------------------------------------------------------------------------
+# sync_disk_changes
+# ---------------------------------------------------------------------------
+
+
+class TestSyncDiskChangesTool:
+    async def test_forwards_scan_flag_and_returns_structured_result(self, mcp_stack):
+        client, plugin = mcp_stack
+
+        async def respond():
+            cmd = await plugin.recv_command()
+            assert cmd["command"] == "sync_disk_changes"
+            assert cmd["params"] == {"scan": False}
+            await plugin.send_response(
+                cmd["request_id"],
+                {
+                    "dialogs_found": 1,
+                    "dialogs_matched": ["Reload Changed Files?"],
+                    "dialogs_confirmed": ["Reload Changed Files?"],
+                    "confirmed_count": 1,
+                    "filesystem_scan": {"status": "completed"},
+                },
+            )
+
+        task = asyncio.create_task(respond())
+        result = await client.call_tool("sync_disk_changes", {"scan": False})
+        await task
+
+        data = result.data
+        assert data["dialogs_found"] == 1
+        assert data["confirmed_count"] == 1
+        assert data["filesystem_scan"]["status"] == "completed"
+
+
+# ---------------------------------------------------------------------------
 # node_find
 # ---------------------------------------------------------------------------
 

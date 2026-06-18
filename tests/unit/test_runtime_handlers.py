@@ -1448,6 +1448,20 @@ async def test_logs_read_handler_plugin_normalizes_structured_payload():
     assert result["lines"] == ["structured 0", "structured 1"]
 
 
+async def test_sync_disk_changes_handler_requires_writable_and_passes_scan_flag():
+    client = StubClient()
+    registry = SessionRegistry()
+    registry.register(_make_session("sync-session", readiness="ready"))
+    registry.set_active("sync-session")
+    runtime = DirectRuntime(registry=registry, client=client)
+
+    result = await editor_handlers.sync_disk_changes(runtime, scan=False)
+
+    assert result == {"status": "ok"}
+    assert client.calls[-1]["command"] == "sync_disk_changes"
+    assert client.calls[-1]["params"] == {"scan": False}
+
+
 # ---------------------------------------------------------------------------
 # Runtime game handler tests
 # ---------------------------------------------------------------------------

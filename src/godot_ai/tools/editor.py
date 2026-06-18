@@ -1,8 +1,8 @@
-"""MCP tools for editor state, logs, screenshots, and reload.
+"""MCP tools for editor state, logs, screenshots, reload, and disk sync.
 
 Top-level: ``editor_state`` (core), ``editor_screenshot``, ``editor_reload_plugin``,
-``logs_read``. Selection get/set, performance monitors, quit, logs_clear collapse
-into ``editor_manage``.
+``logs_read``, ``sync_disk_changes``. Selection get/set, performance monitors,
+quit, logs_clear collapse into ``editor_manage``.
 """
 
 from __future__ import annotations
@@ -215,6 +215,26 @@ def register_editor_tools(mcp: FastMCP, *, include_non_core: bool = True) -> Non
         """
         runtime = DirectRuntime.from_context(ctx, session_id=session_id or None)
         return await editor_handlers.editor_reload_plugin(runtime)
+
+    @mcp.tool(meta=DEFER_META)
+    async def sync_disk_changes(
+        ctx: Context,
+        scan: bool = True,
+        session_id: str = "",
+    ) -> dict:
+        """Acknowledge reload-from-disk prompts and rescan the editor filesystem.
+
+        Use this after local code or asset edits when Godot is showing a
+        confirmation dialog about disk changes, or when the editor has not yet
+        reflected fresh files on disk.
+
+        Args:
+            scan: Trigger ``EditorFileSystem.scan()`` after confirming dialogs.
+                Default True.
+            session_id: Optional Godot session to target. Empty = active session.
+        """
+        runtime = DirectRuntime.from_context(ctx, session_id=session_id or None)
+        return await editor_handlers.sync_disk_changes(runtime, scan=scan)
 
     register_manage_tool(
         mcp,

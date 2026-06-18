@@ -36,7 +36,7 @@ const DOMAINS := [
 	{"id": "batch", "label": "batch", "count": 1, "tools": ["batch_execute"]},
 	{"id": "camera", "label": "camera", "count": 1, "tools": ["camera_manage"]},
 	{"id": "client", "label": "client", "count": 1, "tools": ["client_manage"]},
-	{"id": "editor", "label": "editor", "count": 4, "tools": ["editor_manage", "editor_reload_plugin", "editor_screenshot", "logs_read"]},
+	{"id": "editor", "label": "editor", "count": 5, "tools": ["editor_manage", "editor_reload_plugin", "editor_screenshot", "logs_read", "sync_disk_changes"]},
 	{"id": "filesystem", "label": "filesystem", "count": 1, "tools": ["filesystem_manage"]},
 	{"id": "game", "label": "game", "count": 1, "tools": ["game_manage"]},
 	{"id": "input_map", "label": "input_map", "count": 1, "tools": ["input_map_manage"]},
