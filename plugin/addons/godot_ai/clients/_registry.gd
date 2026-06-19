@@ -16,6 +16,7 @@ const _CLIENT_SCRIPTS := [
 	preload("res://addons/godot_ai/clients/vscode_insiders.gd"),
 	preload("res://addons/godot_ai/clients/zed.gd"),
 	preload("res://addons/godot_ai/clients/gemini_cli.gd"),
+	preload("res://addons/godot_ai/clients/hermes.gd"),
 	preload("res://addons/godot_ai/clients/cline.gd"),
 	preload("res://addons/godot_ai/clients/kilo_code.gd"),
 	preload("res://addons/godot_ai/clients/roo_code.gd"),
