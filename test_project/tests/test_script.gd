@@ -9,6 +9,8 @@ const _LoggerLoader := preload("res://addons/godot_ai/runtime/logger_loader.gd")
 
 ## Tests for ScriptHandler — script creation, reading, attach/detach, and symbol inspection.
 
+const INVALID_IF_PARSE_ERROR := "Parse Error: Expected conditional expression after \"if\"."
+
 var _handler: ScriptHandler
 var _undo_redo: EditorUndoRedoManager
 var _attached_shared_logger = null
@@ -91,6 +93,7 @@ func test_create_script_reports_log_capture_diagnostics_with_real_line() -> void
 		return
 	var path := "res://tests/_mcp_test_invalid_create.gd"
 	var content := "extends Node\n\nfunc _ready() -> void:\n\tif\n\tpass\n"
+	_expect_invalid_if_parse_errors()
 	var result := _handler.create_script({"path": path, "content": content})
 	assert_has_key(result, "data")
 	assert_eq(result.data.path, path)
@@ -98,7 +101,7 @@ func test_create_script_reports_log_capture_diagnostics_with_real_line() -> void
 	assert_eq(result.data.diagnostics_scope, "this_file")
 	assert_eq(result.data.diagnostics_status, "checked")
 	assert_eq(result.data.diagnostics_detail, "log_capture")
-	assert_gt(result.data.diagnostics.size(), 0, "Invalid GDScript should report diagnostics")
+	assert_eq(result.data.diagnostics.size(), 1, "Invalid GDScript should report one diagnostic")
 	assert_eq(result.data.diagnostics[0].path, path)
 	assert_eq(result.data.diagnostics[0].line, 4)
 	assert_eq(result.data.diagnostics[0].level, "error")
@@ -117,11 +120,13 @@ func test_create_script_validation_does_not_pollute_shared_editor_log() -> void:
 	var path := "res://tests/_mcp_test_invalid_create_shared_log.gd"
 	var content := "extends Node\n\nfunc _ready() -> void:\n\tif\n\tpass\n"
 	var cursor := shared_buf.appended_total()
+	_expect_invalid_if_parse_errors()
 	var result := _handler.create_script({"path": path, "content": content})
 	_detach_shared_editor_logger()
 
 	assert_has_key(result, "data")
 	assert_eq(result.data.diagnostics_detail, "log_capture")
+	assert_eq(result.data.diagnostics.size(), 1, "Invalid GDScript should report one diagnostic")
 	var captured := shared_buf.get_since(cursor)
 	assert_eq(captured.entries.size(), 0, "Validation load diagnostics must not leak into the shared editor log")
 	DirAccess.remove_absolute(path)
@@ -165,6 +170,15 @@ func _detach_shared_editor_logger() -> void:
 	if _attached_shared_logger != null and OS.has_method("remove_logger"):
 		OS.call("remove_logger", _attached_shared_logger)
 	_attached_shared_logger = null
+
+
+func _expect_invalid_if_parse_errors() -> void:
+	# Godot 4.7 adds one more logger-visible copy of this parse diagnostic.
+	# Expect the maximum seen across supported engines; older versions tolerate
+	# extra expectations for errors that are never emitted.
+	expect_script_error_containing(INVALID_IF_PARSE_ERROR)
+	expect_script_error_containing(INVALID_IF_PARSE_ERROR)
+	expect_script_error_containing(INVALID_IF_PARSE_ERROR)
 
 
 func test_finish_create_script_deferred_is_static_and_handles_null_connection() -> void:
@@ -275,6 +289,7 @@ func test_patch_script_reports_log_capture_diagnostics_with_real_line() -> void:
 	file.store_string(original)
 	file.close()
 
+	_expect_invalid_if_parse_errors()
 	var result := _handler.patch_script({
 		"path": path,
 		"old_text": "pass",
@@ -286,7 +301,7 @@ func test_patch_script_reports_log_capture_diagnostics_with_real_line() -> void:
 	assert_eq(result.data.diagnostics_scope, "this_file")
 	assert_eq(result.data.diagnostics_status, "checked")
 	assert_eq(result.data.diagnostics_detail, "log_capture")
-	assert_gt(result.data.diagnostics.size(), 0, "Invalid patched GDScript should report diagnostics")
+	assert_eq(result.data.diagnostics.size(), 1, "Invalid patched GDScript should report one diagnostic")
 	assert_eq(result.data.diagnostics[0].path, path)
 	assert_eq(result.data.diagnostics[0].line, 4)
 	assert_eq(result.data.diagnostics[0].level, "error")
@@ -313,6 +328,7 @@ func test_patch_script_validation_does_not_pollute_shared_editor_log() -> void:
 	file.close()
 
 	var cursor := shared_buf.appended_total()
+	_expect_invalid_if_parse_errors()
 	var result := _handler.patch_script({
 		"path": path,
 		"old_text": "pass",
@@ -322,6 +338,7 @@ func test_patch_script_validation_does_not_pollute_shared_editor_log() -> void:
 
 	assert_has_key(result, "data")
 	assert_eq(result.data.diagnostics_detail, "log_capture")
+	assert_eq(result.data.diagnostics.size(), 1, "Invalid patched GDScript should report one diagnostic")
 	var captured := shared_buf.get_since(cursor)
 	assert_eq(captured.entries.size(), 0, "Validation load diagnostics must not leak into the shared editor log")
 	DirAccess.remove_absolute(path)
