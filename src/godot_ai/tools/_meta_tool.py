@@ -129,8 +129,13 @@ def register_manage_tool(
     )
     op_literal = _op_literal_for(frozenset(ops.keys()))
 
-    async def manage(ctx: Context, op, params=None, session_id="") -> dict:
+    async def manage(ctx: Context, op, params=None, session_id="", **kwargs) -> dict:
         runtime = DirectRuntime.from_context(ctx, session_id=session_id or None)
+        # Merge top-level extra params into params dict — allows callers
+        # to pass e.g. {"op":"reparent","path":"...","new_parent":"..."}
+        # without nesting those under "params".
+        if kwargs:
+            params = {**(params or {}), **kwargs}
         return await dispatch_manage_op(
             ops=ops,
             tool_name=tool_name,
