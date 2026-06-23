@@ -129,13 +129,9 @@ def register_manage_tool(
     )
     op_literal = _op_literal_for(frozenset(ops.keys()))
 
-    async def manage(ctx: Context, op, params=None, session_id="", **kwargs) -> dict:
+    async def manage(ctx: Context, op, params=None, session_id="") -> dict:
         runtime = DirectRuntime.from_context(ctx, session_id=session_id or None)
-        # Merge top-level extra params into params dict — allows callers
-        # to pass e.g. {"op":"reparent","path":"...","new_parent":"..."}
-        # without nesting those under "params".
-        if kwargs:
-            params = {**(params or {}), **kwargs}
+        # params 由调用方通过 params 字典传入；**kwargs 被 fastmcp 禁止
         return await dispatch_manage_op(
             ops=ops,
             tool_name=tool_name,
